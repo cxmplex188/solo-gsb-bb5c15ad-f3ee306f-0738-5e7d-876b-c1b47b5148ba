@@ -11,6 +11,7 @@ const {
 } = require('./replay');
 const { computeAssignments } = require('./assignment');
 const { computeRotation } = require('./rotation');
+const { normalizeAbsenceRules, computeAbsenceRotation } = require('./absence');
 
 const app = express();
 app.use(express.json());
@@ -561,6 +562,38 @@ app.get('/api/assignments', (req, res) => {
 app.get('/api/rotation', (req, res) => {
   const { rotation } = loadState();
   res.json(rotation);
+});
+
+/* ---------- 临时缺席试排（不写库） ----------
+ * 舞台监督临时添加多条规则，每条指定一名现有人员与一个提示号闭区间；
+ * 区间按提示号覆盖全量重放后生效的提示（失败提示不占轮次），重叠规则取并集。
+ * 试排沿用搬运资格、组内一人一岗及相邻生效提示不得同人规则，对整场联合
+ * 求解并允许回溯调整前序分配；某轮缺席人员不能出场，区间外仍可参与。
+ * 全程只在内存中计算：不保存规则、不改动正式排班或数据库。
+ * 规则校验（未知人员、无效区间）不通过时整次拒绝（400）并逐条列出原因。
+ */
+app.post('/api/rotation/absence/trial', (req, res) => {
+  const { locations, props, cues } = loadBaseData();
+  const staff = loadStaff();
+  const staffNames = new Set(staff.map((s) => s.name));
+
+  const rawRules = req.body && Array.isArray(req.body.rules) ? req.body.rules : null;
+  if (!rawRules)
+    return res.status(400).json({ error: '请以 { rules: [...] } 形式提交缺席规则' });
+  if (rawRules.length === 0)
+    return res.status(400).json({ error: '请至少添加一条临时缺席规则' });
+
+  const { rules, errors } = normalizeAbsenceRules(rawRules, staffNames);
+  if (errors.length) {
+    return res.status(400).json({
+      error: `缺席规则校验未通过：${errors.map((e) => e.message).join('；')}`,
+      errors,
+    });
+  }
+
+  const replayResult = replay(locations, props, cues);
+  const trial = computeAbsenceRotation(cues, replayResult.results, staff, rules);
+  res.json(trial);
 });
 
 /* ---------- 启动 ---------- */

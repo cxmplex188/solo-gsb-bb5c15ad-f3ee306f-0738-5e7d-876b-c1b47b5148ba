@@ -90,15 +90,18 @@ function combinations(m, size, cap) {
  * @param {Array<{prop:string, from:string, to:string}>} transfers 组内转移
  * @param {string[]} staffNames 全部人员（序号即位号）
  * @param {Map<string, Set<string>>} qualified 人员 -> 具备资格的道具集合
+ * @param {bigint|null} [allowMask] 可选位掩码：仅第 j 位为 1 的人员允许被本组
+ *   动用（临时缺席试排逐轮剔除缺席人员）；null 表示全部人员均可
  * @returns {{mask:bigint, positions:Array<{prop,from,to,staff}>}[]}
  *   按最低位掩码升序（= 按人员录入顺序的字典序），保证排班结果确定
  */
-function feasibleUsedsets(transfers, staffNames, qualified) {
+function feasibleUsedsets(transfers, staffNames, qualified, allowMask = null) {
   const size = transfers.length;
-  // 只可能动用「至少与组内某条转移有资格关系」的人员
+  // 只可能动用「至少与组内某条转移有资格关系」且本轮允许出场的人员
   const eligibleIdx = [];
   staffNames.forEach((name, j) => {
-    if (transfers.some((t) => qualified.get(name).has(t.prop))) eligibleIdx.push(j);
+    const allowed = allowMask === null || (allowMask & (1n << BigInt(j))) !== 0n;
+    if (allowed && transfers.some((t) => qualified.get(name).has(t.prop))) eligibleIdx.push(j);
   });
 
   const options = [];
@@ -129,36 +132,33 @@ function feasibleUsedsets(transfers, staffNames, qualified) {
 }
 
 /**
- * 连场轮换排班（整场联合求解，纯函数）。
+ * 连场轮换求解核心（整场联合求解，纯函数）。
  *
- * @param {Array<{number:number, note:string, transfers:Array}>} cues 已按提示号升序
- * @param {Array<{number:number, ok:boolean}>} results 全量重放结果（replay().results）
- * @param {Array<{name:string, props:string[]}>} staff 人员及其可搬运道具名单
- * @returns {Object} 排班结果，形态见下：
- *   公共字段：status（'ok' | 'blocked' | 'empty' | 'limited'）、
- *     effectiveCueNumbers（按重放顺序的生效提示号；失败提示不在其中，不计轮次）、
- *     rounds（仅 ok 时非空：每条生效提示一项，含完整岗位表 positions 与 usedStaff）、
- *     roster（仅 ok 时非空：每名人员承担的轮次提示号与岗位数）、summary。
- *   blocked 时另有 block：
- *     { number, reason: 'understaffed' | 'rotation',
- *       previousEffectiveCue, soloFeasible, compatibleWithPrevious, transferCount }，
- *     且不输出 rounds / roster（不输出部分岗位表）。
+ * 与 computeRotation 相同的组内 / 跨组约束，但允许逐轮指定「可出场人员掩码」
+ * （allowMasks[i] = 第 i 条生效提示可动用的人员位掩码，null = 全部人员均可），
+ * 供「临时缺席试排」把缺席人员逐轮剔除；缺席区间只作用于被覆盖的轮次，
+ * 区间外轮次的可行动用集合不变。
+ *
+ * @param {Array<{number:number, note:string, transfers:Array}>} effective
+ *   已按提示号升序的「参与轮次」提示（调用方负责剔除失败提示）
+ * @param {string[]} staffNames 全部人员（序号即位号）
+ * @param {Map<string, Set<string>>} qualified 人员 -> 具备资格的道具集合
+ * @param {Array<bigint|null>|null} [allowMasks] 逐轮可出场人员掩码
+ * @param {{skippedCueCount?:number}} [extra] 公共计数字段
+ * @returns {Object}
+ *   status 'ok'：{ rounds, roster }（rounds 每项带 usedStaff；roster 按全部人员）；
+ *   status 'blocked'：{ block: {roundIndex, reason, soloFeasible,
+ *     compatibleWithPrevious, transferCount} }（不含 rounds / roster；
+ *     roundIndex 为生效序列内下标，由调用方映射为提示号）；
+ *   status 'limited'：{ limited }（枚举超上限保护）；
+ *   另含 effectiveCueNumbers / skippedCueCount / summary。
  */
-function computeRotation(cues, results, staff) {
-  const resultByNumber = new Map(results.map((r) => [r.number, r]));
-  const staffNames = staff.map((s) => s.name);
-  const qualified = new Map(staff.map((s) => [s.name, new Set(s.props)]));
-
-  // 仅纳入全量重放整组生效的提示；失败提示不计轮次（不隔开相邻生效提示）
-  const effective = cues.filter((c) => {
-    const r = resultByNumber.get(c.number);
-    return !!(r && r.ok);
-  });
+function runRotation(effective, staffNames, qualified, allowMasks = null, extra = {}) {
+  const skippedCueCount = extra.skippedCueCount || 0;
   const effectiveCueNumbers = effective.map((c) => c.number);
-
   const base = {
     effectiveCueNumbers,
-    skippedCueCount: cues.length - effective.length,
+    skippedCueCount,
     rounds: [],
     roster: [],
     block: null,
@@ -168,13 +168,15 @@ function computeRotation(cues, results, staff) {
     return {
       ...base,
       status: 'empty',
-      summary: { effectiveCues: 0, skippedCues: base.skippedCueCount, staff: staffNames.length, rounds: 0 },
+      summary: { effectiveCues: 0, skippedCues: skippedCueCount, staff: staffNames.length, rounds: 0 },
     };
   }
 
   let perCue;
   try {
-    perCue = effective.map((cue) => feasibleUsedsets(cue.transfers, staffNames, qualified));
+    perCue = effective.map((cue, i) =>
+      feasibleUsedsets(cue.transfers, staffNames, qualified, allowMasks ? allowMasks[i] : null)
+    );
   } catch (err) {
     if (err instanceof RotationLimitError) {
       return {
@@ -183,7 +185,7 @@ function computeRotation(cues, results, staff) {
         rounds: [],
         roster: [],
         limited: { message: err.message, code: err.code, staffCount: err.staffCount, transferCount: err.transferCount, cap: err.cap },
-        summary: { effectiveCues: effective.length, skippedCues: base.skippedCueCount, staff: staffNames.length, rounds: 0 },
+        summary: { effectiveCues: effective.length, skippedCues: skippedCueCount, staff: staffNames.length, rounds: 0 },
       };
     }
     throw err;
@@ -234,10 +236,9 @@ function computeRotation(cues, results, staff) {
       rounds: [],
       roster: [],
       block: {
-        number: cue.number,
+        // 轮次内下标；调用方按 effective[roundIndex] 映射为提示号
+        roundIndex: blockIndex,
         reason: blockReason,
-        // 前一条生效提示号（失败提示不计轮次）；首条即无解时为 null
-        previousEffectiveCue: blockIndex > 0 ? effective[blockIndex - 1].number : null,
         transferCount: cue.transfers.length,
         soloFeasible: perCue[blockIndex].length, // 本组单独可行的动用集合数（0 = 人手不足）
         compatibleWithPrevious:
@@ -249,7 +250,7 @@ function computeRotation(cues, results, staff) {
       },
       summary: {
         effectiveCues: effective.length,
-        skippedCues: base.skippedCueCount,
+        skippedCues: skippedCueCount,
         staff: staffNames.length,
         rounds: blockIndex, // 可行前缀覆盖的生效提示数
       },
@@ -304,7 +305,7 @@ function computeRotation(cues, results, staff) {
     roster,
     summary: {
       effectiveCues: effective.length,
-      skippedCues: base.skippedCueCount,
+      skippedCues: skippedCueCount,
       staff: staffNames.length,
       rounds: rounds.length,
       usedStaff: roster.filter((r) => r.positionCount > 0).length,
@@ -312,4 +313,59 @@ function computeRotation(cues, results, staff) {
   };
 }
 
-module.exports = { computeRotation, feasibleUsedsets, combinations, RotationLimitError, COMBO_CAP };
+/**
+ * 连场轮换排班（整场联合求解，纯函数）：runRotation 在「全员每轮可出场」
+ * 情形下的对外包装，阻塞结果额外给出阻塞提示号与其前一条生效提示号。
+ *
+ * @param {Array<{number:number, note:string, transfers:Array}>} cues 已按提示号升序
+ * @param {Array<{number:number, ok:boolean}>} results 全量重放结果（replay().results）
+ * @param {Array<{name:string, props:string[]}>} staff 人员及其可搬运道具名单
+ * @returns {Object} 排班结果，形态见下：
+ *   公共字段：status（'ok' | 'blocked' | 'empty' | 'limited'）、
+ *     effectiveCueNumbers（按重放顺序的生效提示号；失败提示不在其中，不计轮次）、
+ *     rounds（仅 ok 时非空：每条生效提示一项，含完整岗位表 positions 与 usedStaff）、
+ *     roster（仅 ok 时非空：每名人员承担的轮次提示号与岗位数）、summary。
+ *   blocked 时另有 block：
+ *     { number, reason: 'understaffed' | 'rotation',
+ *       previousEffectiveCue, soloFeasible, compatibleWithPrevious, transferCount }，
+ *     且不输出 rounds / roster（不输出部分岗位表）。
+ */
+function computeRotation(cues, results, staff) {
+  const resultByNumber = new Map(results.map((r) => [r.number, r]));
+  const staffNames = staff.map((s) => s.name);
+  const qualified = new Map(staff.map((s) => [s.name, new Set(s.props)]));
+
+  // 仅纳入全量重放整组生效的提示；失败提示不计轮次（不隔开相邻生效提示）
+  const effective = cues.filter((c) => {
+    const r = resultByNumber.get(c.number);
+    return !!(r && r.ok);
+  });
+
+  const solved = runRotation(effective, staffNames, qualified, null, {
+    skippedCueCount: cues.length - effective.length,
+  });
+
+  if (solved.status !== 'blocked') return solved;
+
+  const bi = solved.block.roundIndex;
+  const cue = effective[bi];
+  const { roundIndex, ...blockRest } = solved.block;
+  return {
+    ...solved,
+    block: {
+      number: cue.number,
+      // 前一条生效提示号（失败提示不计轮次）；首条即无解时为 null
+      previousEffectiveCue: bi > 0 ? effective[bi - 1].number : null,
+      ...blockRest,
+    },
+  };
+}
+
+module.exports = {
+  computeRotation,
+  runRotation,
+  feasibleUsedsets,
+  combinations,
+  RotationLimitError,
+  COMBO_CAP,
+};

@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>🎭 舞台换景排练系统</h1>
-    <p>设置道具初始区位 → 按提示号录入同组转移 → 全量重放校验，整组通过才生效 → 按人员资格生成逐提示岗位表，并对整场生效提示联合求解连场轮换排班</p>
+    <p>设置道具初始区位 → 按提示号录入同组转移 → 全量重放校验，整组通过才生效 → 按人员资格生成逐提示岗位表，并对整场生效提示联合求解连场轮换排班；还可临时添加缺席规则（人员 × 提示号闭区间）进行不写库的缺席试排</p>
   </header>
 
   <main>
@@ -138,10 +138,31 @@
     <!-- 六、连场轮换排班（整场联合求解） -->
     <section class="row">
       <div class="card wide" id="rotation-card">
-        <h2>⑨ 连场轮换排班（整场联合求解）</h2>
+        <h2>⑨ 连场轮换排班（整场联合求解）<a href="#absence-card" class="section-link">临时缺席试排 →</a></h2>
         <p class="hint">把整场<strong>生效提示</strong>按提示号串成连场轮次（失败提示不计轮次、不隔开前后轮）：每条转移仍须由具备该道具资格的人员承担、同组每人一岗，且<strong>同一人员不得出现在相邻两条生效提示中</strong>。排班会对整场联合求解，允许回头调整前序提示的合法分配；任何人员、资格或提示变化后立即按最新数据重算。无法覆盖全场时，只报告<strong>首个无法形成可行前缀的提示号及其前一条生效提示号</strong>，不输出部分岗位表。</p>
         <p id="rotation-summary" class="hint"></p>
         <div id="rotation-panel"></div>
+      </div>
+    </section>
+
+    <!-- 七、临时缺席试排（仅内存，不写库、不改正式排班） -->
+    <section class="row">
+      <div class="card wide" id="absence-card">
+        <h2>⑩ 临时缺席试排（仅内存，不保存规则、不改动正式排班）</h2>
+        <p class="hint">临时添加多条缺席规则，每条指定一名<strong>现有人员</strong>与一个<strong>提示号闭区间</strong>；区间按提示号覆盖全量重放后<strong>生效</strong>的提示（失败提示不占轮次），多条规则重叠时取<strong>并集</strong>。试排沿用搬运资格、组内一人一岗及<strong>相邻生效提示不得同人</strong>规则，对整场<strong>联合求解并允许回溯调整前序分配</strong>；某轮缺席人员不能出场，区间外仍可参与。规则不会保存，人员 / 资格 / 提示一有变化，旧试排结果即清空。</p>
+        <form id="absence-form">
+          <table class="table absence-table">
+            <thead><tr><th>缺席人员</th><th>提示号区间起</th><th>提示号区间止（闭区间）</th><th></th></tr></thead>
+            <tbody id="absence-rows"></tbody>
+          </table>
+          <div class="btn-row">
+            <button type="button" id="absence-add" class="ghost">＋ 添加一条规则</button>
+            <span class="spacer"></span>
+            <button type="button" id="absence-clear" class="ghost">清空规则</button>
+            <button type="submit" id="absence-run">🧯 开始临时缺席试排</button>
+          </div>
+        </form>
+        <div id="absence-panel" class="preview-panel hidden"></div>
       </div>
     </section>
   </main>
