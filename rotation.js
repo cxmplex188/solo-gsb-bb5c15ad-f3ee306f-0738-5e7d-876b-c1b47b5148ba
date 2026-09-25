@@ -32,6 +32,11 @@
  *  可达集合，实际舞台规模（个位/十位人数与每组转移数）下为毫秒级；为防御
  *  异常输入导致的枚举膨胀，设有组合数上限（COMBO_CAP），超限返回
  *  状态 'limited' 而非超时。
+ *
+ * 可选的临时缺席约束（临时缺席试排用，见 absence.js）：调用方传入
+ *  options.absentAt(cueNumber) 返回该提示号轮次缺席的人员名集合，求解时
+ *  缺席人员不得出现在该轮的任何动用集合中（区间外不受影响）；缺省表示
+ *  无缺席，即正式排班。
  */
 
 const { runMaxMatching } = require('./assignment');
@@ -134,6 +139,9 @@ function feasibleUsedsets(transfers, staffNames, qualified) {
  * @param {Array<{number:number, note:string, transfers:Array}>} cues 已按提示号升序
  * @param {Array<{number:number, ok:boolean}>} results 全量重放结果（replay().results）
  * @param {Array<{name:string, props:string[]}>} staff 人员及其可搬运道具名单
+ * @param {Object} [options] 可选约束
+ * @param {function(number): (Set<string>|Array<string>|null|undefined)} [options.absentAt]
+ *   临时缺席试排：返回某提示号轮次缺席的人员名集合，缺席人员该轮不得被动用
  * @returns {Object} 排班结果，形态见下：
  *   公共字段：status（'ok' | 'blocked' | 'empty' | 'limited'）、
  *     effectiveCueNumbers（按重放顺序的生效提示号；失败提示不在其中，不计轮次）、
@@ -144,9 +152,13 @@ function feasibleUsedsets(transfers, staffNames, qualified) {
  *       previousEffectiveCue, soloFeasible, compatibleWithPrevious, transferCount }，
  *     且不输出 rounds / roster（不输出部分岗位表）。
  */
-function computeRotation(cues, results, staff) {
+function computeRotation(cues, results, staff, options = {}) {
+  // 临时缺席约束（试排用）：absentAt(cueNumber) 返回该轮缺席人员名集合；缺省 = 无缺席
+  const absentAt = options && typeof options.absentAt === 'function' ? options.absentAt : null;
+
   const resultByNumber = new Map(results.map((r) => [r.number, r]));
   const staffNames = staff.map((s) => s.name);
+  const staffIndex = new Map(staffNames.map((name, j) => [name, j]));
   const qualified = new Map(staff.map((s) => [s.name, new Set(s.props)]));
 
   // 仅纳入全量重放整组生效的提示；失败提示不计轮次（不隔开相邻生效提示）
@@ -174,7 +186,17 @@ function computeRotation(cues, results, staff) {
 
   let perCue;
   try {
-    perCue = effective.map((cue) => feasibleUsedsets(cue.transfers, staffNames, qualified));
+    perCue = effective.map((cue) => {
+      const sets = feasibleUsedsets(cue.transfers, staffNames, qualified);
+      if (!absentAt) return sets;
+      // 缺席约束：本轮缺席人员不得出现在任何动用集合中（位掩码须不相交）
+      let absentMask = 0n;
+      for (const name of absentAt(cue.number) || []) {
+        const j = staffIndex.get(name);
+        if (j !== undefined) absentMask |= 1n << BigInt(j);
+      }
+      return absentMask === 0n ? sets : sets.filter((opt) => (opt.mask & absentMask) === 0n);
+    });
   } catch (err) {
     if (err instanceof RotationLimitError) {
       return {

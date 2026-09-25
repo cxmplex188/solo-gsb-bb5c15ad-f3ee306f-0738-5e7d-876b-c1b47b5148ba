@@ -11,6 +11,7 @@ const {
 } = require('./replay');
 const { computeAssignments } = require('./assignment');
 const { computeRotation } = require('./rotation');
+const { computeAbsenceTrial, validateAbsenceRules } = require('./absence');
 
 const app = express();
 app.use(express.json());
@@ -561,6 +562,22 @@ app.get('/api/assignments', (req, res) => {
 app.get('/api/rotation', (req, res) => {
   const { rotation } = loadState();
   res.json(rotation);
+});
+
+/* ---------- 临时缺席试排（不写库） ----------
+ * 舞台监督录入若干条「人员 × 提示号闭区间」的缺席规则，点击试排后只在内存中
+ * 按连场轮换排班的同一套规则（搬运资格、组内一人一岗、相邻生效提示不得同人、
+ * 整场联合求解并允许回溯调整前序分配）试算整场：不保存规则、不改动正式排班。
+ * 区间按提示号覆盖全量重放后生效的提示（失败提示不占轮次），重叠规则取并集；
+ * 未知人员与无效区间在此校验并返回 400。
+ */
+app.post('/api/absence/trial', (req, res) => {
+  const { locations, props, cues } = loadBaseData();
+  const staff = loadStaff();
+  const v = validateAbsenceRules(req.body && req.body.rules, staff.map((s) => s.name));
+  if (v.err) return bad(res, v.err);
+  const replayResult = replay(locations, props, cues);
+  res.json(computeAbsenceTrial(cues, replayResult.results, staff, v.rules));
 });
 
 /* ---------- 启动 ---------- */

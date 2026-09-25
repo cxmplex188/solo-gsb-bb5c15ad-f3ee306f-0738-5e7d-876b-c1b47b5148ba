@@ -222,6 +222,7 @@ function render() {
   renderStaff();
   renderAssignments();
   renderRotation();
+  renderAbsenceForm();
 }
 
 /* ---------- 换景人员与逐提示岗位表 ---------- */
@@ -500,6 +501,175 @@ function renderRotation() {
         <tbody>${bodyRows}</tbody>
       </table>
     </div>`;
+}
+
+/* ---------- 临时缺席试排（不写库） ---------- */
+
+let absenceRules = [];   // {staff, from, to}，仅保存在页面内存中，不提交保存
+let absenceResult = null; // 最近一次试排结果；规则或全局数据一变即失效
+
+function clearAbsenceResult() {
+  absenceResult = null;
+  const panel = $('#absence-panel');
+  panel.classList.add('hidden');
+  panel.innerHTML = '';
+}
+
+function absenceStaffOptions(selected) {
+  const opts = state.staff
+    .map((s) => `<option value="${esc(s.name)}" ${s.name === selected ? 'selected' : ''}>${esc(s.name)}</option>`);
+  // 规则引用的人员可能刚被删除：保留显示并标记，交由服务端校验报告未知人员
+  if (selected && !state.staff.some((s) => s.name === selected)) {
+    opts.unshift(`<option value="${esc(selected)}" selected>${esc(selected)}（已删除）</option>`);
+  }
+  return opts.join('');
+}
+
+function renderAbsenceForm() {
+  clearAbsenceResult(); // 全局数据（人员/资格/提示）一变，旧试排结果即失效
+  const box = $('#absence-rules');
+  if (!absenceRules.length) {
+    box.innerHTML = '<p class="hint">还没有缺席规则。点「＋ 添加缺席规则」为某位人员登记一段临时缺席的提示号区间。</p>';
+    return;
+  }
+  box.innerHTML = absenceRules
+    .map((r, i) => `
+      <div class="abs-rule" data-idx="${i}">
+        <span class="abs-label">规则 ${i + 1}</span>
+        <select class="abs-staff">${absenceStaffOptions(r.staff)}</select>
+        <span class="abs-label">缺席提示号</span>
+        <input class="abs-from" type="number" min="1" step="1" placeholder="起" value="${esc(r.from)}" />
+        <span class="abs-label">至</span>
+        <input class="abs-to" type="number" min="1" step="1" placeholder="止" value="${esc(r.to)}" />
+        <span class="abs-label">（闭区间）</span>
+        <button type="button" class="link abs-remove">移除</button>
+      </div>`)
+    .join('');
+}
+
+function renderAbsenceError(msg) {
+  const panel = $('#absence-panel');
+  panel.innerHTML = `<div class="pv-title">🧪 临时缺席试排</div><div class="pv-error">${esc(msg)}</div>`;
+  panel.classList.remove('hidden');
+}
+
+function renderAbsenceResult(data) {
+  const panel = $('#absence-panel');
+
+  // 并集覆盖：每名缺席人员实际缺席的生效提示（失败提示不占轮次，不在其中）
+  const coverHtml = data.coverage.length
+    ? `<h4>缺席覆盖（重叠规则取并集，仅统计全量重放后生效的提示）</h4>
+       <ul class="abs-cover">${data.coverage
+         .map((c) => {
+           const intervals = c.intervals.map((iv) => `[${iv.from}, ${iv.to}]`).join(' ∪ ');
+           const cues = c.cues.length
+             ? `缺席 ${c.cues.length} 轮：${c.cues.map((n) => `提示 ${n}`).join('、')}`
+             : '未覆盖任何生效提示（区间外仍可参与）';
+           return `<li>「${esc(c.staff)}」区间 ${esc(intervals)} → ${cues}</li>`;
+         })
+         .join('')}</ul>`
+    : '<p class="hint">未传入缺席规则，等同于正式排班的试算。</p>';
+
+  let body = '';
+
+  if (data.status === 'empty') {
+    body = `
+      ${effectiveSequenceHtml(data)}
+      <p class="hint">当前没有任何整组生效的提示，无需试排（失败提示不纳入轮次）。</p>`;
+  } else if (data.status === 'limited') {
+    body = `
+      ${effectiveSequenceHtml(data)}
+      <div class="rt-blocked">
+        <div class="rt-block-title">⚠️ 试排未计算</div>
+        <p>${esc(data.limited.message)}</p>
+      </div>`;
+  } else if (data.status === 'blocked') {
+    // 无解：只报告首个无法形成可行前缀的提示号与原因，不输出部分岗位表
+    const b = data.block;
+    const prevText = b.previousEffectiveCue === null
+      ? '<strong>无</strong>（该提示就是第一条生效提示）'
+      : `提示 <strong>${b.previousEffectiveCue}</strong>`;
+    const absentHere = data.coverage.filter((c) => c.cues.includes(b.number)).map((c) => c.staff);
+    const absentNote = absentHere.length
+      ? `本轮缺席人员：${absentHere.map((s) => `「${esc(s)}」`).join('、')}。`
+      : '';
+    const reason = b.reason === 'understaffed'
+      ? `在缺席规则下，提示 ${b.number} 需 ${b.transferCount} 个同时执行的岗位，可用的资格人员无法整组覆盖（本组单独就没有完整匹配）。${absentNote}`
+      : `提示 ${b.number} 在缺席规则下<strong>单独可以排开</strong>（有 ${b.soloFeasible} 种合法动用方案），但与排到提示 ${b.previousEffectiveCue} 的任意合法分配都必然让同一人员连场出场（相邻两条生效提示不得同人）；系统已允许回溯调整前序各提示的合法分配，仍找不到覆盖到该提示的可行前缀（兼容方案 ${b.compatibleWithPrevious} 种）。${absentNote}`;
+    body = `
+      ${effectiveSequenceHtml(data, b.number)}
+      <div class="rt-blocked">
+        <div class="rt-block-title">✗ 缺席规则下无法对整场形成可行连场排班</div>
+        <ul class="rt-block-lines">
+          <li>首个无法形成可行前缀的提示号：<strong class="rt-num">${b.number}</strong></li>
+          <li>其前一条生效提示号：${prevText}</li>
+        </ul>
+        <p>${reason}</p>
+        <p class="hint">按规则<strong>不输出部分岗位表</strong>——调整缺席规则（或在 ⑦ 中调整人员/资格）后重新试排；正式排班 ⑨ 不受影响。</p>
+      </div>`;
+  } else {
+    // 可行：逐轮岗位表 + 人员汇总
+    const roundCards = data.rounds
+      .map((r) => {
+        const rows = r.positions
+          .map((p, i) => `
+            <tr>
+              <td>${i + 1}</td>
+              <td>${esc(p.prop)}</td>
+              <td>${esc(p.from)} <span class="arrow">→</span> ${esc(p.to)}</td>
+              <td><strong>${esc(p.staff)}</strong></td>
+            </tr>`)
+          .join('');
+        const absent = r.absentStaff && r.absentStaff.length
+          ? `<span class="badge skip">本轮缺席：${r.absentStaff.map((s) => esc(s)).join('、')}</span>`
+          : '';
+        return `
+          <div class="cue-item ok rt-round">
+            <div class="cue-head">
+              <span class="num">轮次 ${r.round} · 提示 ${r.number}</span>
+              <span class="note">${esc(r.note || '')}</span>
+              ${absent}
+              <span class="badge ok">✓ ${r.positions.length} 岗 · ${r.usedStaff.map((s) => esc(s)).join('、')}</span>
+            </div>
+            <table class="table assign-table">
+              <thead><tr><th>岗位</th><th>道具</th><th>转移</th><th>担当</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
+      })
+      .join('');
+
+    const coverByStaff = new Map(data.coverage.map((c) => [c.staff, c.cues]));
+    const rosterRows = data.roster
+      .map((row) => {
+        const cues = row.cues.length
+          ? row.cues.map((n) => `提示 ${n}`).join('、')
+          : '<span class="hint">整场未出场</span>';
+        const ab = coverByStaff.get(row.staff);
+        const abText = ab && ab.length
+          ? ` <span class="trace-tag dim">缺席：${ab.map((n) => `提示 ${n}`).join('、')}</span>`
+          : '';
+        return `<tr><th class="rt-staff">${esc(row.staff)}${abText}</th><td>${cues}</td><td>${row.positionCount}</td></tr>`;
+      })
+      .join('');
+
+    body = `
+      ${effectiveSequenceHtml(data)}
+      <div class="rt-ok-banner">✓ 缺席规则下整场 ${data.rounds.length} 条生效提示均可连场轮换，共动用 ${data.summary.usedStaff} 名人员；相邻两轮无同一人员出场，缺席人员未在被覆盖的轮次出场。</div>
+      <h4>逐轮岗位表（联合求解结果，可能已对前序提示的合法分配做出调整）</h4>
+      <div>${roundCards}</div>
+      <h4>人员汇总</h4>
+      <table class="table">
+        <thead><tr><th>人员</th><th>出场提示</th><th>岗位数</th></tr></thead>
+        <tbody>${rosterRows}</tbody>
+      </table>`;
+  }
+
+  panel.innerHTML = `
+    <div class="pv-title">🧪 临时缺席试排 · ${data.rules.length} 条规则（仅内存计算：规则未保存，正式排班 ⑨ 未改动）</div>
+    ${coverHtml}
+    ${body}`;
+  panel.classList.remove('hidden');
 }
 
 /* ---------- 事件 ---------- */
@@ -1026,6 +1196,71 @@ $('#staff-list').addEventListener('submit', (e) => {
   const staff = form.dataset.staff;
   const prop = form.querySelector('.qual-prop').value;
   api(`/api/staff/${encodeURIComponent(staff)}/quals`, 'POST', { prop }).catch(() => {});
+});
+
+/* ---------- 临时缺席试排（不写库） ---------- */
+
+$('#absence-add').addEventListener('click', () => {
+  absenceRules.push({ staff: state.staff.length ? state.staff[0].name : '', from: '', to: '' });
+  renderAbsenceForm();
+});
+
+// 规则内容变化只更新内存模型（不重绘，避免输入中断），旧试排结果随即失效
+$('#absence-rules').addEventListener('input', (e) => {
+  const row = e.target.closest('.abs-rule');
+  if (!row) return;
+  const rule = absenceRules[Number(row.dataset.idx)];
+  if (!rule) return;
+  if (e.target.classList.contains('abs-from')) rule.from = e.target.value;
+  if (e.target.classList.contains('abs-to')) rule.to = e.target.value;
+  clearAbsenceResult();
+});
+
+$('#absence-rules').addEventListener('change', (e) => {
+  const row = e.target.closest('.abs-rule');
+  if (!row || !e.target.classList.contains('abs-staff')) return;
+  const rule = absenceRules[Number(row.dataset.idx)];
+  if (!rule) return;
+  rule.staff = e.target.value;
+  clearAbsenceResult();
+});
+
+$('#absence-rules').addEventListener('click', (e) => {
+  if (!e.target.classList.contains('abs-remove')) return;
+  const row = e.target.closest('.abs-rule');
+  absenceRules.splice(Number(row.dataset.idx), 1);
+  renderAbsenceForm();
+});
+
+$('#absence-run').addEventListener('click', async () => {
+  if (!absenceRules.length) {
+    renderAbsenceError('请先添加至少一条缺席规则（人员 × 提示号闭区间）。');
+    return;
+  }
+  const btn = $('#absence-run');
+  btn.disabled = true;
+  btn.textContent = '试排中…';
+  try {
+    const res = await fetch('/api/absence/trial', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rules: absenceRules.map((r) => ({ staff: r.staff, from: Number(r.from), to: Number(r.to) })),
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      renderAbsenceError(data.error || '试排失败');
+    } else {
+      absenceResult = data;
+      renderAbsenceResult(data);
+    }
+  } catch (err) {
+    renderAbsenceError('无法连接服务器');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🧪 开始试排（不保存）';
+  }
 });
 
 /* ---------- 启动 ---------- */

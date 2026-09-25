@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>🎭 舞台换景排练系统</h1>
-    <p>设置道具初始区位 → 按提示号录入同组转移 → 全量重放校验，整组通过才生效 → 按人员资格生成逐提示岗位表，并对整场生效提示联合求解连场轮换排班</p>
+    <p>设置道具初始区位 → 按提示号录入同组转移 → 全量重放校验，整组通过才生效 → 按人员资格生成逐提示岗位表，并对整场生效提示联合求解连场轮换排班，支持临时缺席试排（不写库）</p>
   </header>
 
   <main>
@@ -138,10 +138,25 @@
     <!-- 六、连场轮换排班（整场联合求解） -->
     <section class="row">
       <div class="card wide" id="rotation-card">
-        <h2>⑨ 连场轮换排班（整场联合求解）</h2>
+        <h2>⑨ 连场轮换排班（整场联合求解） <a href="#absence-card" class="section-link">临时缺席试排 →</a></h2>
         <p class="hint">把整场<strong>生效提示</strong>按提示号串成连场轮次（失败提示不计轮次、不隔开前后轮）：每条转移仍须由具备该道具资格的人员承担、同组每人一岗，且<strong>同一人员不得出现在相邻两条生效提示中</strong>。排班会对整场联合求解，允许回头调整前序提示的合法分配；任何人员、资格或提示变化后立即按最新数据重算。无法覆盖全场时，只报告<strong>首个无法形成可行前缀的提示号及其前一条生效提示号</strong>，不输出部分岗位表。</p>
         <p id="rotation-summary" class="hint"></p>
         <div id="rotation-panel"></div>
+      </div>
+    </section>
+
+    <!-- 七、临时缺席试排（不写库） -->
+    <section class="row">
+      <div class="card wide" id="absence-card">
+        <h2>⑩ 临时缺席试排（不写库）</h2>
+        <p class="hint">添加若干条「人员 × 提示号闭区间」的缺席规则后点「开始试排」：区间按提示号覆盖<strong>全量重放后生效</strong>的提示（失败提示不占轮次），同一人员的多条规则（含区间重叠）取<strong>并集</strong>；缺席人员在被覆盖的轮次不能出场，<strong>区间外仍可参与</strong>。试排沿用搬运资格、组内一人一岗与相邻生效提示不得同人规则，对整场<strong>联合求解</strong>并允许回溯调整前序分配；可行时展示逐轮岗位与人员汇总，无解时只报告首个无法形成可行前缀的提示号与原因。全程只在内存中计算——<strong>不保存规则，也不改动 ⑨ 的正式排班</strong>。</p>
+        <div id="absence-rules"></div>
+        <div class="btn-row">
+          <button type="button" id="absence-add" class="ghost">＋ 添加缺席规则</button>
+          <span class="spacer"></span>
+          <button type="button" id="absence-run">🧪 开始试排（不保存）</button>
+        </div>
+        <div id="absence-panel" class="preview-panel hidden"></div>
       </div>
     </section>
   </main>
